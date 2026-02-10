@@ -1,0 +1,70 @@
+# MiniClaw Go Configuration File
+# Copy this file to config.yaml and fill in your settings
+
+# Telegram Bot Configuration
+telegram:
+  enabled: true
+  token: "YOUR_TELEGRAM_BOT_TOKEN"
+  webhook: ""
+
+# WebSocket Server Configuration
+websocket:
+  enabled: true
+  port: 18789
+  host: "0.0.0.0.0"
+
+# LLM Configuration
+llm:
+  provider: "anthropic"  # Options: anthropic, openai, local
+  api_key: "YOUR_ANTHROPIC_API_KEY"
+  model: "claude-sonnet-4-5"
+  max_tokens: 4096
+  temperature: 0.7
+  local_model:
+    enabled: false
+    path: "/path/to/model"
+    type: "llama"
+
+# Multi-Model Configuration (Optional)
+# You can define multiple models and switch between them at runtime
+# models:
+#   - name: "claude"
+#     provider: "anthropic"
+#     api_key: "YOUR_ANTHROPIC_API_KEY"
+#     model: "claude-sonnet-4-5"
+#     max_tokens: 4096
+#     temperature: 0.7
+#   - name: "gpt4"
+#     provider: "openai"
+#     api_key: "YOUR_OPENAI_API_KEY"
+#     model: "gpt-4o"
+#     max_tokens: 4096
+#     temperature: 0.7
+#   - name: "local"
+#     provider: "local"
+#     local_model:
+#       enabled: true
+#       path: "/path/to/model.gguf"
+#       type: "llama"
+#     max_tokens: 2048
+#     temperature: 0.8
+# default_model: "claude"
+
+# Storage Configuration
+storage:
+  base_path: "./data"
+
+# Tools Configuration
+tools:
+  web_search:
+    enabled: false
+    api_key: "YOUR_BRAVE_SEARCH_API_KEY"
+    provider: "brave"
+
+# Proxy Configuration
+proxy:
+  enabled: false
+  host: "127.0.0.1"
+  port: 7890
+  username: ""
+  password: ""
