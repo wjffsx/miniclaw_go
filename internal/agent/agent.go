@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/wjffsx/miniclaw_go/internal/bus"
 	agentcontext "github.com/wjffsx/miniclaw_go/internal/context"
 	"github.com/wjffsx/miniclaw_go/internal/llm"
+	"github.com/wjffsx/miniclaw_go/internal/mcp"
+	"github.com/wjffsx/miniclaw_go/internal/scheduler"
+	"github.com/wjffsx/miniclaw_go/internal/skills"
 	"github.com/wjffsx/miniclaw_go/internal/storage"
 	"github.com/wjffsx/miniclaw_go/internal/tools"
 )
@@ -18,6 +22,9 @@ type Agent struct {
 	llmManager     *llm.MultiModelManager
 	toolExecutor   *tools.ToolExecutor
 	contextBuilder *agentcontext.Builder
+	skillSelector  *skills.SkillSelector
+	mcpManager     *mcp.MCPManager
+	taskManager    *scheduler.TaskManager
 	sessionStorage storage.SessionStorage
 	memoryStorage  storage.MemoryStorage
 	ctx            context.Context
@@ -32,10 +39,18 @@ type Config struct {
 	MemoryStorage  storage.MemoryStorage
 	Storage        storage.Storage
 	ToolRegistry   *tools.ToolRegistry
+	SkillRegistry  *skills.SkillRegistry
+	SkillConfig    *skills.SkillConfig
+	MCPManager     *mcp.MCPManager
+	TaskManager    *scheduler.TaskManager
 	MaxIterations  int
 }
 
 func NewAgent(config *Config, messageBus bus.MessageBus, ctx context.Context) (*Agent, error) {
+	if config == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+
 	llmManager, err := llm.NewMultiModelManager(config.LLMModels, config.DefaultModel)
 	if err != nil {
 		log.Printf("Warning: failed to create LLM manager: %v", err)
@@ -50,6 +65,20 @@ func NewAgent(config *Config, messageBus bus.MessageBus, ctx context.Context) (*
 		MemoryStorage: config.MemoryStorage,
 	})
 
+	var skillSelector *skills.SkillSelector
+	if config.SkillRegistry != nil {
+		selectionConfig := &skills.SelectionConfig{
+			Method:    "hybrid",
+			Threshold: 0.5,
+			MaxActive: 5,
+		}
+		if config.SkillConfig != nil {
+			selectionConfig = &config.SkillConfig.Selection
+		}
+		skillSelector = skills.NewSkillSelector(config.SkillRegistry, nil, selectionConfig)
+		log.Printf("Skill selector initialized with method: %s", selectionConfig.Method)
+	}
+
 	maxIterations := config.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = 10
@@ -60,6 +89,9 @@ func NewAgent(config *Config, messageBus bus.MessageBus, ctx context.Context) (*
 		llmManager:     llmManager,
 		toolExecutor:   toolExecutor,
 		contextBuilder: contextBuilder,
+		skillSelector:  skillSelector,
+		mcpManager:     config.MCPManager,
+		taskManager:    config.TaskManager,
 		sessionStorage: config.SessionStorage,
 		memoryStorage:  config.MemoryStorage,
 		ctx:            ctx,
@@ -96,6 +128,10 @@ func (a *Agent) Stop() error {
 }
 
 func (a *Agent) HandleMessage(ctx context.Context, msg *bus.Message) error {
+	if msg == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+
 	log.Printf("Agent received message from %s: %s", msg.Channel, msg.Content)
 
 	if a.llmManager == nil {
@@ -115,7 +151,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg *bus.Message) error {
 		Content: msg.Content,
 	})
 
-	response, err := a.runReActLoop(ctx, messages)
+	response, err := a.runReActLoop(ctx, messages, msg.Content)
 	if err != nil {
 		return fmt.Errorf("failed to run ReAct loop: %w", err)
 	}
@@ -143,7 +179,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg *bus.Message) error {
 	return nil
 }
 
-func (a *Agent) runReActLoop(ctx context.Context, messages []llm.Message) (string, error) {
+func (a *Agent) runReActLoop(ctx context.Context, messages []llm.Message, userMessage string) (string, error) {
 	toolSchemas := a.toolExecutor.GetSchemas()
 
 	agentContext, err := a.contextBuilder.Build(ctx, toolSchemas)
@@ -152,6 +188,17 @@ func (a *Agent) runReActLoop(ctx context.Context, messages []llm.Message) (strin
 	}
 
 	systemPrompt := agentContext.BuildSystemPrompt(toolSchemas)
+
+	if a.skillSelector != nil {
+		selectedSkills, err := a.skillSelector.Select(ctx, userMessage)
+		if err != nil {
+			log.Printf("Failed to select skills: %v", err)
+		} else if len(selectedSkills) > 0 {
+			log.Printf("Selected %d skills: %v", len(selectedSkills), getSkillNames(selectedSkills))
+			skillContext := a.buildSkillContext(selectedSkills)
+			systemPrompt += "\n\n" + skillContext
+		}
+	}
 
 	for iteration := 0; iteration < a.maxIterations; iteration++ {
 		log.Printf("ReAct iteration %d/%d", iteration+1, a.maxIterations)
@@ -212,6 +259,37 @@ func (a *Agent) runReActLoop(ctx context.Context, messages []llm.Message) (strin
 	return "", fmt.Errorf("max iterations (%d) reached without final answer", a.maxIterations)
 }
 
+func (a *Agent) buildSkillContext(selectedSkills []*skills.Skill) string {
+	var builder strings.Builder
+
+	builder.WriteString("## Active Skills\n\n")
+	builder.WriteString("The following skills have been activated for this conversation:\n\n")
+
+	for _, skill := range selectedSkills {
+		builder.WriteString(fmt.Sprintf("### %s\n", skill.Name))
+		builder.WriteString(fmt.Sprintf("**Description**: %s\n", skill.Description))
+		if skill.Category != "" {
+			builder.WriteString(fmt.Sprintf("**Category**: %s\n", skill.Category))
+		}
+		if len(skill.Tags) > 0 {
+			builder.WriteString(fmt.Sprintf("**Tags**: %v\n", skill.Tags))
+		}
+		builder.WriteString(fmt.Sprintf("**Instructions**:\n%s\n\n", skill.Content))
+	}
+
+	builder.WriteString("Use these skills as guidelines when responding to the user. Adapt your approach based on the specific requirements of each skill.\n")
+
+	return builder.String()
+}
+
+func getSkillNames(skills []*skills.Skill) []string {
+	names := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		names = append(names, skill.Name)
+	}
+	return names
+}
+
 func (a *Agent) parseResponse(content string) ([]tools.ToolCall, bool) {
 	var response struct {
 		Thought     string           `json:"thought"`
@@ -256,6 +334,38 @@ func (a *Agent) getChatHistory(chatID string) []llm.Message {
 
 	a.chatHistory[chatID] = llmMessages
 	return llmMessages
+}
+
+func (a *Agent) GetChatHistory(chatID string) []llm.Message {
+	return a.getChatHistory(chatID)
+}
+
+func (a *Agent) ClearChatHistory(chatID string) {
+	a.chatHistory[chatID] = []llm.Message{}
+}
+
+func (a *Agent) SetMaxIterations(maxIterations int) {
+	a.maxIterations = maxIterations
+}
+
+func (a *Agent) GetMaxIterations() int {
+	return a.maxIterations
+}
+
+func (a *Agent) GetToolExecutor() *tools.ToolExecutor {
+	return a.toolExecutor
+}
+
+func (a *Agent) GetSkillSelector() *skills.SkillSelector {
+	return a.skillSelector
+}
+
+func (a *Agent) GetMCPManager() *mcp.MCPManager {
+	return a.mcpManager
+}
+
+func (a *Agent) GetTaskManager() *scheduler.TaskManager {
+	return a.taskManager
 }
 
 func (a *Agent) setChatHistory(chatID string, messages []llm.Message) {

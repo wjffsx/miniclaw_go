@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -13,6 +15,9 @@ type Config struct {
 	LLM       LLMConfig
 	Storage   StorageConfig
 	Tools     ToolsConfig
+	Skills    SkillsConfig
+	MCP       MCPConfig
+	Scheduler SchedulerConfig
 	Search    SearchConfig
 	Proxy     ProxyConfig
 }
@@ -62,6 +67,40 @@ type StorageConfig struct {
 
 type ToolsConfig struct {
 	WebSearch WebSearchConfig
+}
+
+type SkillsConfig struct {
+	Enabled    bool
+	Directory  string
+	AutoReload bool
+	MaxActive  int
+	Selection  SelectionConfig
+}
+
+type SelectionConfig struct {
+	Method    string
+	Threshold float64
+}
+
+type MCPConfig struct {
+	Enabled bool
+	Clients []MCPClientConfig
+}
+
+type MCPClientConfig struct {
+	Name      string
+	Type      string
+	Endpoint  string
+	Transport string
+	Headers   map[string]string
+	Timeout   int
+}
+
+type SchedulerConfig struct {
+	Enabled      bool
+	TasksFile    string
+	AutoStart    bool
+	TickInterval int
 }
 
 type SearchConfig struct {
@@ -141,7 +180,17 @@ func (cm *FileConfigManager) loadFromFile() (*Config, error) {
 		return cm.getDefaultConfig(), nil
 	}
 
-	return cm.getDefaultConfig(), nil
+	data, err := os.ReadFile(cm.path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	config := cm.getDefaultConfig()
+	if err := yaml.Unmarshal(data, config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	return config, nil
 }
 
 func (cm *FileConfigManager) getDefaultConfig() *Config {
@@ -173,6 +222,26 @@ func (cm *FileConfigManager) getDefaultConfig() *Config {
 				Enabled:  false,
 				Provider: "brave",
 			},
+		},
+		Skills: SkillsConfig{
+			Enabled:    true,
+			Directory:  "./data/skills",
+			AutoReload: true,
+			MaxActive:  5,
+			Selection: SelectionConfig{
+				Method:    "hybrid",
+				Threshold: 0.5,
+			},
+		},
+		MCP: MCPConfig{
+			Enabled: false,
+			Clients: []MCPClientConfig{},
+		},
+		Scheduler: SchedulerConfig{
+			Enabled:      false,
+			TasksFile:    "./data/tasks.json",
+			AutoStart:    true,
+			TickInterval: 1,
 		},
 		Search: SearchConfig{
 			BraveAPIKey: "",

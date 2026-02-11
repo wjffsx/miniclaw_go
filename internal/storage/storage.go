@@ -99,6 +99,10 @@ func (fs *FileStorage) ListFiles(ctx context.Context, prefix string) ([]string, 
 
 	fullPath := filepath.Join(fs.basePath, prefix)
 
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		return []string{}, nil
+	}
+
 	var files []string
 	err := filepath.Walk(fullPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	prompt = "mimi> "
+	Prompt = "mimi> "
 )
 
 type CLI struct {
@@ -90,7 +90,7 @@ func (c *CLI) Start() error {
 			fmt.Println("CLI stopped")
 			return nil
 		default:
-			fmt.Print(prompt)
+			fmt.Print(Prompt)
 			if !c.scanner.Scan() {
 				fmt.Println()
 				return nil
@@ -125,13 +125,76 @@ func (c *CLI) Stop() error {
 	return nil
 }
 
+func (c *CLI) RegisterCommand(name string, cmd Command) {
+	c.commands[name] = cmd
+}
+
+func (c *CLI) GetCommand(name string) (Command, bool) {
+	cmd, ok := c.commands[name]
+	return cmd, ok
+}
+
+func (c *CLI) ListCommands() []Command {
+	commands := make([]Command, 0, len(c.commands))
+	for _, cmd := range c.commands {
+		commands = append(commands, cmd)
+	}
+	return commands
+}
+
+func (c *CLI) ExecuteCommand(name string, args []string) error {
+	cmd, ok := c.commands[name]
+	if !ok {
+		return fmt.Errorf("command not found: %s", name)
+	}
+	return cmd.Handler(args)
+}
+
+func (c *CLI) ParseInput(line string) (string, []string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", nil
+	}
+
+	if strings.HasPrefix(line, Prompt) {
+		line = strings.TrimSpace(line[len(Prompt):])
+	}
+
+	if line == "" {
+		return "", nil
+	}
+
+	args := strings.Fields(line)
+	if len(args) == 0 {
+		return "", nil
+	}
+
+	cmdName := strings.ToLower(args[0])
+	return cmdName, args[1:]
+}
+
+func (c *CLI) GetChatID() string {
+	return c.chatID
+}
+
+func (c *CLI) SetChatID(chatID string) {
+	c.chatID = chatID
+}
+
+func (c *CLI) HandleInput(line string) error {
+	cmdName, args := c.ParseInput(line)
+	if cmdName == "" {
+		return nil
+	}
+	return c.ExecuteCommand(cmdName, args)
+}
+
 func (c *CLI) cmdHelp(args []string) error {
 	if len(args) > 0 {
 		cmdName := strings.ToLower(args[0])
 		cmd, ok := c.commands[cmdName]
 		if !ok {
-			fmt.Printf("Unknown command: %s\n", cmdName)
-			return nil
+			return fmt.Errorf("unknown command: %s", cmdName)
 		}
 		fmt.Printf("Usage: %s\n", cmd.Usage)
 		fmt.Printf("  %s\n", cmd.Description)
@@ -177,5 +240,5 @@ func (c *CLI) cmdConfig(args []string) error {
 
 func (c *CLI) cmdExit(args []string) error {
 	fmt.Println("Exiting...")
-	return fmt.Errorf("exit")
+	return nil
 }

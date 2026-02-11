@@ -15,8 +15,11 @@ import (
 	"github.com/wjffsx/miniclaw_go/internal/config"
 	"github.com/wjffsx/miniclaw_go/internal/filetools"
 	"github.com/wjffsx/miniclaw_go/internal/llm"
+	"github.com/wjffsx/miniclaw_go/internal/mcp"
 	"github.com/wjffsx/miniclaw_go/internal/memory"
+	"github.com/wjffsx/miniclaw_go/internal/scheduler"
 	"github.com/wjffsx/miniclaw_go/internal/search"
+	"github.com/wjffsx/miniclaw_go/internal/skills"
 	"github.com/wjffsx/miniclaw_go/internal/storage"
 	"github.com/wjffsx/miniclaw_go/internal/tools"
 )
@@ -29,6 +32,9 @@ var (
 	telegramBot     *telegram.Bot
 	websocketServer *websocket.Server
 	agentService    *agent.Agent
+	skillWatcher    *skills.SkillFileWatcher
+	mcpManager      *mcp.MCPManager
+	taskManager     *scheduler.TaskManager
 )
 
 func main() {
@@ -183,6 +189,109 @@ func initializeAgent(ctx context.Context, messageBus bus.MessageBus, cfg *config
 
 	log.Printf("Registered %d tools", len(toolRegistry.List()))
 
+	var skillRegistry *skills.SkillRegistry
+	var skillConfig *skills.SkillConfig
+
+	if cfg.Skills.Enabled {
+		log.Println("Initializing skills system...")
+		skillRegistry = skills.NewSkillRegistry(fileStorage)
+
+		if err := skillRegistry.LoadFromDirectory(ctx, cfg.Skills.Directory); err != nil {
+			log.Printf("Failed to load skills from directory: %v", err)
+		} else {
+			log.Printf("Loaded %d skills", skillRegistry.Count())
+		}
+
+		if cfg.Skills.AutoReload {
+			watcher, err := skills.NewSkillFileWatcher(skillRegistry, skills.NewSkillParser(fileStorage))
+			if err != nil {
+				log.Printf("Failed to create skill file watcher: %v", err)
+			} else {
+				skillWatcher = watcher
+				if err := skillWatcher.WatchDirectory(cfg.Skills.Directory); err != nil {
+					log.Printf("Failed to watch skills directory: %v", err)
+				}
+				log.Println("Skill file watcher started")
+			}
+		}
+
+		skillConfig = &skills.SkillConfig{
+			Directory:  cfg.Skills.Directory,
+			AutoReload: cfg.Skills.AutoReload,
+			MaxActive:  cfg.Skills.MaxActive,
+			Selection: skills.SelectionConfig{
+				Method:    cfg.Skills.Selection.Method,
+				Threshold: cfg.Skills.Selection.Threshold,
+			},
+		}
+	}
+
+	var mcpManager *mcp.MCPManager
+	if cfg.MCP.Enabled {
+		log.Println("Initializing MCP manager...")
+		mcpManager = mcp.NewMCPManager(toolRegistry)
+
+		for _, clientConfig := range cfg.MCP.Clients {
+			mcpClientConfig := &mcp.ClientConfig{
+				Name:      clientConfig.Name,
+				Type:      clientConfig.Type,
+				Endpoint:  clientConfig.Endpoint,
+				Transport: clientConfig.Transport,
+				Headers:   clientConfig.Headers,
+				Timeout:   clientConfig.Timeout,
+			}
+
+			mcpClient, err := mcp.NewClient(mcpClientConfig)
+			if err != nil {
+				log.Printf("Failed to create MCP client %s: %v", clientConfig.Name, err)
+				continue
+			}
+
+			adapterConfig := &mcp.AdapterConfig{
+				ClientName:  clientConfig.Name,
+				Prefix:      "mcp_" + clientConfig.Name + "_",
+				Description: "MCP tool from " + clientConfig.Name,
+			}
+
+			if err := mcpManager.AddClient(mcpClient, adapterConfig); err != nil {
+				log.Printf("Failed to add MCP client %s: %v", clientConfig.Name, err)
+				continue
+			}
+
+			log.Printf("Added MCP client: %s", clientConfig.Name)
+		}
+
+		if err := mcpManager.ConnectAll(ctx); err != nil {
+			log.Printf("Failed to connect MCP clients: %v", err)
+		} else {
+			log.Printf("MCP manager initialized with %d clients", len(cfg.MCP.Clients))
+		}
+	}
+
+	var taskManager *scheduler.TaskManager
+	if cfg.Scheduler.Enabled {
+		log.Println("Initializing task scheduler...")
+		sched := scheduler.NewScheduler(&scheduler.SchedulerConfig{
+			TickInterval: time.Duration(cfg.Scheduler.TickInterval) * time.Second,
+		})
+
+		taskManager = scheduler.NewTaskManager(sched, &scheduler.TaskManagerConfig{
+			TasksFile: cfg.Scheduler.TasksFile,
+		})
+
+		if cfg.Scheduler.AutoStart {
+			if err := sched.Start(); err != nil {
+				log.Printf("Failed to start scheduler: %v", err)
+			} else {
+				log.Println("Task scheduler started")
+			}
+
+			if err := taskManager.Start(); err != nil {
+				log.Printf("Failed to start task manager: %v", err)
+			}
+		}
+	}
+
 	llmModels := make([]*llm.ModelConfig, 0)
 
 	if len(cfg.LLM.Models) > 0 {
@@ -229,6 +338,10 @@ func initializeAgent(ctx context.Context, messageBus bus.MessageBus, cfg *config
 		MemoryStorage:  memoryStorage,
 		Storage:        fileStorage,
 		ToolRegistry:   toolRegistry,
+		SkillRegistry:  skillRegistry,
+		SkillConfig:    skillConfig,
+		MCPManager:     mcpManager,
+		TaskManager:    taskManager,
 	}
 
 	var err error
@@ -256,6 +369,22 @@ func gracefulShutdown(ctx context.Context, messageBus bus.MessageBus) error {
 	if websocketServer != nil {
 		if err := websocketServer.Stop(); err != nil {
 			log.Printf("Error stopping WebSocket server: %v", err)
+		}
+	}
+
+	if skillWatcher != nil {
+		skillWatcher.Stop()
+	}
+
+	if mcpManager != nil {
+		if err := mcpManager.Close(); err != nil {
+			log.Printf("Error closing MCP manager: %v", err)
+		}
+	}
+
+	if taskManager != nil {
+		if err := taskManager.Stop(); err != nil {
+			log.Printf("Error stopping task manager: %v", err)
 		}
 	}
 

@@ -79,6 +79,9 @@ type Bot struct {
 	wg           sync.WaitGroup
 	mu           sync.RWMutex
 	enabled      bool
+	started      bool
+	pollTimeout  int
+	pollInterval time.Duration
 }
 
 type Config struct {
@@ -96,7 +99,7 @@ func NewBot(cfg *Config, messageBus bus.MessageBus, ctx context.Context) *Bot {
 
 	return &Bot{
 		token:        cfg.Token,
-		apiURL:       fmt.Sprintf(defaultAPIURL, "%s", "%s"),
+		apiURL:       fmt.Sprintf(defaultAPIURL, cfg.Token, "%s"),
 		updateOffset: 0,
 		httpClient: &http.Client{
 			Timeout: time.Duration(pollTimeout+5) * time.Second,
@@ -114,6 +117,14 @@ func (b *Bot) Start() error {
 		return nil
 	}
 
+	b.mu.Lock()
+	if b.started {
+		b.mu.Unlock()
+		return fmt.Errorf("bot already started")
+	}
+	b.started = true
+	b.mu.Unlock()
+
 	log.Println("Starting Telegram bot...")
 
 	b.wg.Add(1)
@@ -123,6 +134,14 @@ func (b *Bot) Start() error {
 }
 
 func (b *Bot) Stop() error {
+	b.mu.Lock()
+	if !b.started {
+		b.mu.Unlock()
+		return fmt.Errorf("bot not started")
+	}
+	b.started = false
+	b.mu.Unlock()
+
 	log.Println("Stopping Telegram bot...")
 	b.cancel()
 	b.wg.Wait()
@@ -305,4 +324,215 @@ func (b *Bot) SetToken(token string) {
 	b.token = token
 	b.enabled = token != ""
 	log.Printf("Telegram bot token updated (len=%d)", len(token))
+}
+
+func (b *Bot) IsRunning() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.started
+}
+
+func (b *Bot) GetToken() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.token
+}
+
+func (b *Bot) GetAPIURL() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.apiURL
+}
+
+func (b *Bot) SetPollTimeout(timeout int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pollTimeout = timeout
+}
+
+func (b *Bot) SetPollInterval(interval int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pollInterval = time.Duration(interval) * time.Second
+}
+
+func (b *Bot) GetUpdates(offset int64) ([]Update, error) {
+	params := url.Values{}
+	params.Add("offset", strconv.FormatInt(offset, 10))
+	params.Add("timeout", strconv.Itoa(defaultPollTimeout))
+
+	apiURL := fmt.Sprintf(b.apiURL, b.token, "getUpdates?"+params.Encode())
+
+	resp, err := b.httpClient.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get updates: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !apiResp.OK {
+		if apiResp.Error != nil {
+			return nil, fmt.Errorf("API error: %s", apiResp.Error.Message)
+		}
+		return nil, fmt.Errorf("API returned not OK")
+	}
+
+	updates, ok := apiResp.Result.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid result format")
+	}
+
+	result := make([]Update, 0, len(updates))
+	for _, update := range updates {
+		updateMap, ok := update.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		updateID, ok := updateMap["update_id"].(float64)
+		if !ok {
+			continue
+		}
+
+		result = append(result, Update{
+			UpdateID: int64(updateID),
+		})
+	}
+
+	return result, nil
+}
+
+func (b *Bot) SetWebhook(webhookURL string) error {
+	if !b.enabled {
+		return fmt.Errorf("telegram bot is disabled")
+	}
+
+	params := url.Values{}
+	params.Add("url", webhookURL)
+
+	apiURL := fmt.Sprintf(b.apiURL, b.token, "setWebhook?"+params.Encode())
+
+	resp, err := b.httpClient.Get(apiURL)
+	if err != nil {
+		return fmt.Errorf("failed to set webhook: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !apiResp.OK {
+		if apiResp.Error != nil {
+			return fmt.Errorf("API error: %s", apiResp.Error.Message)
+		}
+		return fmt.Errorf("API returned not OK")
+	}
+
+	return nil
+}
+
+func (b *Bot) DeleteWebhook() error {
+	if !b.enabled {
+		return fmt.Errorf("telegram bot is disabled")
+	}
+
+	apiURL := fmt.Sprintf(b.apiURL, b.token, "deleteWebhook")
+
+	resp, err := b.httpClient.Get(apiURL)
+	if err != nil {
+		return fmt.Errorf("failed to delete webhook: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !apiResp.OK {
+		if apiResp.Error != nil {
+			return fmt.Errorf("API error: %s", apiResp.Error.Message)
+		}
+		return fmt.Errorf("API returned not OK")
+	}
+
+	return nil
+}
+
+func (b *Bot) GetMe() (*User, error) {
+	if !b.enabled {
+		return nil, fmt.Errorf("telegram bot is disabled")
+	}
+
+	apiURL := fmt.Sprintf(b.apiURL, b.token, "getMe")
+
+	resp, err := b.httpClient.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get me: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if !apiResp.OK {
+		if apiResp.Error != nil {
+			return nil, fmt.Errorf("API error: %s", apiResp.Error.Message)
+		}
+		return nil, fmt.Errorf("API returned not OK")
+	}
+
+	result, ok := apiResp.Result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid result format")
+	}
+
+	user := &User{}
+	if id, ok := result["id"].(float64); ok {
+		user.ID = int64(id)
+	}
+	if firstName, ok := result["first_name"].(string); ok {
+		user.FirstName = firstName
+	}
+	if lastName, ok := result["last_name"].(string); ok {
+		user.LastName = lastName
+	}
+	if username, ok := result["username"].(string); ok {
+		user.Username = username
+	}
+
+	return user, nil
+}
+
+func (b *Bot) handleUpdate(update *Update) {
+	if update.Message == nil {
+		return
+	}
+
+	if b.messageBus == nil {
+		return
+	}
+
+	msg := &bus.Message{
+		ID:      fmt.Sprintf("telegram-%d", update.UpdateID),
+		Channel: bus.ChannelTelegram,
+		ChatID:  fmt.Sprintf("%.0f", float64(update.Message.Chat.ID)),
+		Content: update.Message.Text,
+	}
+
+	if err := b.messageBus.Publish(b.ctx, bus.ChannelTelegram, msg); err != nil {
+		log.Printf("Failed to publish message to bus: %v", err)
+	}
+}
+
+func (b *Bot) poll() {
+	b.pollUpdates()
 }

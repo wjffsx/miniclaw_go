@@ -29,8 +29,18 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+type WebSocketConn interface {
+	SetReadLimit(limit int64)
+	ReadMessage() (messageType int, p []byte, err error)
+	WriteMessage(messageType int, data []byte) error
+	Close() error
+	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
+	SetPongHandler(h func(appData string) error)
+}
+
 type Client struct {
-	conn   *websocket.Conn
+	conn   WebSocketConn
 	chatID string
 	send   chan []byte
 	server *Server
@@ -47,6 +57,7 @@ type Server struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	mu         sync.RWMutex
+	started    bool
 }
 
 type Message struct {
@@ -75,17 +86,25 @@ func NewServer(cfg *Config, messageBus bus.MessageBus, ctx context.Context) *Ser
 }
 
 func (s *Server) Start(port int) error {
+	s.mu.Lock()
+	if s.started {
+		s.mu.Unlock()
+		return fmt.Errorf("server already started")
+	}
+	s.started = true
+	s.mu.Unlock()
+
 	log.Printf("Starting WebSocket server on port %d...", port)
 
 	go s.run()
-
-	http.HandleFunc("/", s.handleWebSocket)
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("WebSocket server listening on %s", addr)
 
 	go func() {
-		if err := http.ListenAndServe(addr, nil); err != nil && err != http.ErrServerClosed {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", s.handleWebSocket)
+		if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
 			log.Printf("WebSocket server error: %v", err)
 		}
 	}()
@@ -94,6 +113,14 @@ func (s *Server) Start(port int) error {
 }
 
 func (s *Server) Stop() error {
+	s.mu.Lock()
+	if !s.started {
+		s.mu.Unlock()
+		return nil
+	}
+	s.started = false
+	s.mu.Unlock()
+
 	log.Println("Stopping WebSocket server...")
 	s.cancel()
 	s.wg.Wait()
@@ -289,5 +316,26 @@ func (s *Server) Broadcast(text string) error {
 		return nil
 	default:
 		return fmt.Errorf("broadcast buffer full")
+	}
+}
+
+func (s *Server) GetClientCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.clients)
+}
+
+func (s *Server) IsRunning() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.started
+}
+
+func NewClient(conn WebSocketConn, chatID string, server *Server) *Client {
+	return &Client{
+		conn:   conn,
+		chatID: chatID,
+		send:   make(chan []byte, 256),
+		server: server,
 	}
 }

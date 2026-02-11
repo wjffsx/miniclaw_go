@@ -25,6 +25,6 @@ func (h *Handler) HandleMessage(ctx context.Context, msg *bus.Message) error {
 
 	log.Printf("CLI received response: %.40s...", msg.Content)
 
-	fmt.Printf("\nResponse: %s\n%s", msg.Content, prompt)
+	fmt.Printf("\nResponse: %s\n%s", msg.Content, Prompt)
 	return nil
 }

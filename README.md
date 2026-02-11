@@ -13,6 +13,7 @@ MiniClaw Go 是一个基于树莓派5和 Go 语言开发的个人 AI 助手，�
 - **工具调用机制**：支持网络搜索、获取时间、计算、文件操作等工具
 - **多模型支持**：支持 Anthropic、OpenAI 等多个 LLM 提供商，可根据需求动态切换
 - **本地模型运行**：支持在树莓派5上运行小型本地 LLM（通过 llama.cpp）
+- **MCP 协议支持**：支持 Model Context Protocol (MCP)，可连接外部 MCP 服务器并调用其工具
 - **ReAct 循环**：支持多轮对话和智能工具调用
 - **HTTP 代理支持**：支持通过 HTTP 代理访问外部服务
 - **性能优化**：连接池、请求重试、速率限制和性能监控
@@ -44,6 +45,10 @@ miniclaw/
 │   │   ├── monitor.go   # 性能监控
 │   │   ├── ratelimit.go # 速率限制
 │   │   └── scanner.go   # 模型扫描器
+│   ├── mcp/            # MCP 协议支持
+│   │   ├── mcp_protocol.go  # MCP 协议实现
+│   │   ├── mcp_client.go    # MCP 客户端
+│   │   └── mcp_adapter.go   # MCP 工具适配器
 │   ├── search/          # 搜索服务
 │   │   └── brave.go     # Brave Search API 集成
 │   ├── storage/         # 存储服务
@@ -115,6 +120,7 @@ docker run -d --name miniclaw_go -p 8080:8080 miniclaw_go
 - **LLM 配置**：API 密钥、模型选择、温度、最大令牌数
 - **存储配置**：数据目录、会话存储、记忆存储
 - **工具配置**：网络搜索 API、文件操作路径
+- **MCP 配置**：Model Context Protocol 客户端配置
 - **代理配置**：HTTP 代理地址和端口
 - **性能配置**：连接池大小、重试次数、速率限制
 
@@ -160,6 +166,22 @@ tools:
   file_operations:
     enabled: true
     base_path: "./data/files"
+
+mcp:
+  enabled: true
+  clients:
+    - name: "filesystem"
+      type: "stdio"
+      endpoint: "node /path/to/filesystem-mcp-server.js"
+      transport: "stdio"
+      timeout: 30
+    - name: "brave-search"
+      type: "http"
+      endpoint: "http://localhost:3000"
+      transport: "http"
+      headers:
+        "Authorization": "Bearer your_api_key"
+      timeout: 30
 
 proxy:
   enabled: false
@@ -221,6 +243,71 @@ type Tool interface {
 err := multiModelManager.SwitchModel("gpt")
 ```
 
+### MCP 协议支持
+
+MiniClaw Go 支持 Model Context Protocol (MCP)，可以连接外部 MCP 服务器并调用其工具。
+
+**主要功能：**
+
+- **多客户端管理**：同时连接多个 MCP 服务器
+- **工具自动注册**：自动将 MCP 工具注册到工具注册表
+- **HTTP 和 STDIO 传输**：支持多种传输协议
+- **资源访问**：访问 MCP 服务器提供的资源
+- **提示词管理**：使用 MCP 服务器的提示词
+
+**配置 MCP 客户端：**
+
+```yaml
+mcp:
+  enabled: true
+  clients:
+    - name: "filesystem"
+      type: "stdio"
+      endpoint: "node /path/to/filesystem-mcp-server.js"
+      transport: "stdio"
+      timeout: 30
+    - name: "brave-search"
+      type: "http"
+      endpoint: "http://localhost:3000"
+      transport: "http"
+      headers:
+        "Authorization": "Bearer your_api_key"
+      timeout: 30
+```
+
+**使用 MCP 工具：**
+
+MCP 工具会自动添加前缀（默认为 `mcp_`），例如：
+- `mcp_filesystem_read_file`
+- `mcp_brave-search_search`
+
+**MCP API：**
+
+```go
+// 创建 MCP 管理器
+mcpManager := mcp.NewMCPManager(toolRegistry)
+
+// 添加客户端
+clientConfig := &mcp.ClientConfig{
+    Name:      "filesystem",
+    Type:      "stdio",
+    Endpoint:  "node /path/to/server.js",
+    Transport: "stdio",
+}
+client, _ := mcp.NewClient(clientConfig)
+adapterConfig := &mcp.AdapterConfig{
+    ClientName: "filesystem",
+    Prefix:     "mcp_",
+}
+mcpManager.AddClient(client, adapterConfig)
+
+// 连接所有客户端
+mcpManager.ConnectAll(ctx)
+
+// 获取客户端状态
+statuses := mcpManager.ListClients()
+```
+
 ### 性能优化
 
 - **连接池**：复用 HTTP 连接
@@ -272,6 +359,29 @@ golint ./...
 - **单元测试**：每个模块都有对应的单元测试
 - **集成测试**：测试各模块之间的交互
 - **端到端测试**：测试完整的用户流程
+
+### 测试覆盖率
+
+当前测试覆盖率（按模块）：
+
+| 模块 | 覆盖率 | 状态 |
+|------|--------|------|
+| bus | 92.9% | ✅ 高 |
+| context | 87.1% | ✅ 高 |
+| skills | 83.9% | ✅ 高 |
+| tools | 85.3% | ✅ 高 |
+| search | 81.7% | ✅ 高 |
+| storage | 77.3% | ✅ 中 |
+| config | 72.9% | ✅ 中 |
+| filetools | 63.5% | ✅ 中 |
+| memory | 58.3% | ✅ 中 |
+| scheduler | 40.7% | ✅ 中 |
+| mcp | 46.2% | ✅ 中 |
+| cli | 53.1% | ✅ 中 |
+| websocket | 34.5% | ✅ 低 |
+| agent | 28.9% | ✅ 低 |
+| telegram | 17.9% | ✅ 低 |
+| llm | 17.2% | ✅ 低 |
 
 运行集成测试：
 ```bash
